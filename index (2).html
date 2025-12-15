@@ -1,0 +1,174 @@
+<!--
+Проєкт: проста форма реєстрації (index.html) + простий бекенд на Node.js/Express (server.js).
+
+УВАГА (важливо):
+ - Надсилати звичайні паролі електронною поштою — **небезпечно**. Я в прикладі показав як це робиться для демонстрації, але **рекомендую** замість цього відправляти:
+    1) лист з посиланням для підтвердження електронної пошти, або
+    2) тимчасовий одноразовий токен/код для встановлення пароля.
+ - Зберігайте хеші паролів (bcrypt), а не самі паролі.
+ - Для реального проду — використовуйте захищений SMTP (SendGrid, Mailgun, SES або Gmail App Password / OAuth2) та HTTPS.
+-->
+
+--- index.html ---
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Реєстрація — Демо</title>
+  <style>
+    body{font-family:Inter,system-ui,Arial;margin:0;background:#f4f6fb;display:flex;align-items:center;justify-content:center;height:100vh}
+    .card{background:#fff;padding:24px;border-radius:12px;box-shadow:0 8px 30px rgba(20,30,60,.08);width:360px}
+    h1{margin:0 0 12px;font-size:20px}
+    label{display:block;margin-top:10px;font-size:13px}
+    input{width:100%;padding:10px;border-radius:8px;border:1px solid #e3e7ef;margin-top:6px}
+    button{margin-top:16px;width:100%;padding:10px;border-radius:8px;border:0;background:#2563eb;color:#fff;font-weight:600}
+    .note{font-size:12px;color:#666;margin-top:10px}
+    .ok{color:green}
+    .err{color:#b91c1c}
+  </style>
+</head>
+<body>
+  <form id="regForm" class="card" onsubmit="return false">
+    <h1>Реєстрація</h1>
+    <label>Ім'я<input id="name" name="name" required></label>
+    <label>Електронна пошта<input id="email" name="email" type="email" required></label>
+    <label>Пароль<input id="password" name="password" type="password" minlength="6" required></label>
+    <button id="submit">Зареєструватися</button>
+    <div id="message" class="note"></div>
+    <div class="note" style="margin-top:8px;font-size:11px">Демо: бекенд надсилає лист з паролем — це лише приклад. У проді не робіть так.</div>
+  </form>
+
+  <script>
+    const form = document.getElementById('regForm');
+    const msg = document.getElementById('message');
+    document.getElementById('submit').addEventListener('click', async () => {
+      const name = document.getElementById('name').value.trim();
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+      msg.textContent = '';
+      if (!name || !email || password.length < 6) { msg.textContent = 'Перевірте дані.'; msg.className='note err'; return }
+      try {
+        const res = await fetch('/register', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({name,email,password})
+        });
+        const j = await res.json();
+        if (res.ok) { msg.textContent = j.message; msg.className='note ok' }
+        else { msg.textContent = j.error || 'Помилка'; msg.className='note err' }
+      } catch (e) {
+        msg.textContent = 'Не вдалося з'єднатися з сервером'; msg.className='note err'
+      }
+    });
+  </script>
+</body>
+</html>
+
+--- server.js ---
+// Простий сервер Node.js + Express + nodemailer
+// Для демонстрації: приймає POST /register і надсилає лист на вказаний емейл.
+// НЕ ЗАБУВАЙТЕ: в реальному застосунку не надсилайте паролі в листі.
+
+const express = require('express');
+const bodyParser = require('body-parser');
+const nodemailer = require('nodemailer');
+const bcrypt = require('bcrypt');
+require('dotenv').config();
+
+const app = express();
+app.use(bodyParser.json());
+app.use(express.static(__dirname)); // щоб віддавати index.html
+
+// Просте "БД" в пам'яті для демонстрації
+const users = [];
+
+// Налаштування транспорту для відправки листів
+// Використайте реальний SMTP: SendGrid, Mailgun, або Gmail App Password
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: Number(process.env.SMTP_PORT || 587),
+  secure: process.env.SMTP_SECURE === 'true', // true для 465
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS
+  }
+});
+
+app.post('/register', async (req, res) => {
+  const {name, email, password} = req.body || {};
+  if (!name || !email || !password || password.length < 6) return res.status(400).json({error:'Невірні дані'});
+  if (users.find(u=>u.email===email)) return res.status(400).json({error:'Користувач з таким email вже існує'});
+
+  try {
+    // Хешуємо пароль і зберігаємо у "БД"
+    const hashed = await bcrypt.hash(password, 10);
+    users.push({name,email,passwordHash:hashed,createdAt:new Date()});
+
+    // --- ВАРІАНТ A: (НЕБЕЗПЕЧНО) Надіслати сам пароль у листі (лише для демонстрації) ---
+    const mailOptions = {
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: email,
+      subject: 'Лист реєстрації — ваш пароль (демо)',
+      text: `Доброго дня, ${name}\n\nДякуємо за реєстрацію. Ваш пароль: ${password}\n\n(Це демо. В реальних системах не надсилайте паролі електронною поштою.)`
+    };
+    await transporter.sendMail(mailOptions);
+
+    // --- КРАЩИЙ ВАРІАНТ (рекомендовано): надсилайте посилання для підтвердження або одноразовий токен ---
+    // приклад: створити token, зберегти його для користувача і надсилати лист з посиланням
+    // const token = Math.random().toString(36).slice(2);
+    // users[users.length-1].confirmToken = token;
+    // const confirmMail = { from:..., to: email, subject: 'Підтвердження емейлу', html: `<p>Натисніть <a href="https://yourdomain.com/confirm?token=${token}">тут</a></p>` };
+    // await transporter.sendMail(confirmMail);
+
+    res.json({message: 'Реєстрація пройшла. Лист відправлено на вказаний email.'});
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({error:'Внутрішня помилка сервера'});
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, ()=>console.log(`Server running on http://localhost:${PORT}`));
+
+--- package.json ---
+{
+  "name": "register-demo",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {"start":"node server.js"},
+  "dependencies": {
+    "bcrypt": "^5.1.0",
+    "body-parser": "^1.20.2",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "nodemailer": "^6.9.4"
+  }
+}
+
+--- .env.example ---
+# Приклад .env (створіть .env у корені проекту та заповніть дані)
+PORT=3000
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=ваш@smtp.user
+SMTP_PASS=ваш_SMTP_пароль
+SMTP_FROM="Ваш Сайт <no-reply@yourdomain.com>"
+
+--- Інструкція (коротко) ---
+1) Скопіюйте файл index.html і server.js у папку проекту.
+2) Створіть файл package.json як вище або виконайте `npm init -y` і встановіть залежності:
+   npm install express body-parser nodemailer bcrypt dotenv
+3) Створіть .env за прикладом і вкажіть дані SMTP (або користуйтесь сервісом для надсилання листів).
+4) Запустіть: `node server.js` і відкрийте http://localhost:3000
+
+--- Примітки ---
+- Це простий демонстраційний приклад. Для продакшену потрібно:
+  • Використовувати HTTPS
+  • Захист від брутфорсу (rate-limit)
+  • Правильна валідація емейлів
+  • Зберігайте дані в реальній базі (Postgres, Mongo тощо)
+  • Використовуйте перевірені сервіси для надсилання пошти
+
+
